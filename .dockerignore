@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+__pycache__
+*.py[cod]
+*.log
+
+build
+build-hip
+build-vision
+
+Maya-data
+models
+*.gguf
+*.part
+
+.DS_Store
