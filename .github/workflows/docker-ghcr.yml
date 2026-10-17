@@ -1,57 +1,99 @@
-name: Build and publish Docker image
+name: Build Project Maya Docker image (A10)
 
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      maya_tag:
+        description: "要构建的 mw00/project-maya 源码 tag，例如 v1.2.3"
+        required: true
+        type: string
 
 permissions:
   contents: read
   packages: write
 
+env:
+  REGISTRY: ghcr.io
+  SOURCE_REPOSITORY: mw00/project-maya
+
 jobs:
-  docker:
+  build-and-push:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+      # 检出当前构建仓库，以便读取这里的 Dockerfile。
+      - name: Checkout build repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
-      - name: Set lowercase image name
+      # 检查输入格式，并确认 Maya 源仓库存在这个 tag。
+      - name: Validate Maya source tag
+        id: maya-tag
+        shell: bash
+        env:
+          MAYA_TAG: ${{ inputs.maya_tag }}
+        run: |
+          set -euo pipefail
+
+          # 限制为 Docker tag 可用的安全字符，并避免生成过长的镜像 tag。
+          if [[ ! "$MAYA_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]]; then
+            echo "无效的 Maya tag：$MAYA_TAG"
+            echo "请使用不超过 80 个字符的 tag，且只包含字母、数字、点、下划线或连字符。"
+            exit 1
+          fi
+
+          if ! git ls-remote --exit-code --refs \
+            "https://github.com/${SOURCE_REPOSITORY}.git" \
+            "refs/tags/${MAYA_TAG}" >/dev/null; then
+            echo "源仓库 ${SOURCE_REPOSITORY} 中找不到 tag：${MAYA_TAG}"
+            exit 1
+          fi
+
+          echo "tag=${MAYA_TAG}" >> "$GITHUB_OUTPUT"
+
+      # 将指定 tag 的 Maya 源码检出到 maya-source 目录。
+      - name: Checkout Maya source
+        uses: actions/checkout@v5
+        with:
+          repository: mw00/project-maya
+          ref: ${{ steps.maya-tag.outputs.tag }}
+          path: maya-source
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Prepare image name
         id: image
         shell: bash
-        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate image tags
-        id: meta
-        uses: docker/metadata-action@v5
+      - name: Build and push A10 image
+        uses: docker/build-push-action@v7
         with:
-          images: ${{ steps.image.outputs.name }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
+          context: ./maya-source
+          file: ./Dockerfile
+          platforms: linux/amd64
           push: true
           build-args: |
-            CUDA_ARCHITECTURES=75;80;86;89;90;100;120
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            CUDA_DEVEL_IMAGE=nvidia/cuda:13.1.2-devel-ubuntu24.04
+            CUDA_RUNTIME_IMAGE=nvidia/cuda:13.1.2-runtime-ubuntu24.04
+            CUDA_ARCH=86
+            MAYA_SOURCE_REF=${{ steps.maya-tag.outputs.tag }}
+          tags: |
+            ghcr.io/${{ steps.image.outputs.name }}:cuda13.1.2-sm86-a10-maya-${{ steps.maya-tag.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/mw00/project-maya
+            org.opencontainers.image.version=${{ steps.maya-tag.outputs.tag }}
+            org.opencontainers.image.revision=${{ github.sha }}
